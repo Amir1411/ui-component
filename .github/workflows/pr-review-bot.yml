@@ -39,7 +39,7 @@ jobs:
       # Install dependencies INSIDE pr-review-bot
       - name: Install bot dependencies
         working-directory: pr-review-bot
-        run: npm install
+        run: npm install --legacy-peer-deps
 
       - name: Run PR review bot
         working-directory: pr-review-bot
