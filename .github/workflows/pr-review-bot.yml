@@ -16,37 +16,49 @@ jobs:
   review:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      # Checkout the repo where the PR is happening
+      - name: Checkout target repo
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # Checkout your bot repo into a subfolder
+      - name: Checkout pr-review-bot
+        uses: actions/checkout@v4
+        with:
+          repository: Amir1411/pr-review-bot
+          ref: main
+          path: pr-review-bot
+          fetch-depth: 1
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
 
-      - name: Install deps
+      # Install dependencies INSIDE pr-review-bot
+      - name: Install bot dependencies
+        working-directory: pr-review-bot
         run: npm install
 
       - name: Run PR review bot
+        working-directory: pr-review-bot
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          # Use GitHub's built-in token for reading PR data in this repo
           GITHUB_TOKEN: ${{ github.token }}
-          # optional if you use this env in your code
           GEMINI_MODEL: gemini-2.5-flash
         run: |
           PR_URL="${{ github.event.pull_request.html_url }}"
           echo "Reviewing: $PR_URL"
 
-          # Pipe PR URL into ADK runner (no web UI, no manual steps)
-          OUT="$(printf "%s\n" "$PR_URL" | npx adk run src/agent.ts)"
+          # IMPORTANT: call ADK explicitly to avoid "could not determine executable"
+          OUT="$(printf "%s\n" "$PR_URL" | npx -y @google/adk run src/agent.ts)"
 
           echo "---- BOT OUTPUT START ----"
           echo "$OUT"
           echo "---- BOT OUTPUT END ----"
 
-          # Write to GitHub Job Summary (nice for non-technical users)
+          # Job summary
           {
             echo "## PR Review Bot Report"
             echo ""
@@ -55,7 +67,6 @@ jobs:
             echo "### Output"
             echo ""
             echo '```markdown'
-            # prevent summary from becoming huge
             echo "$OUT" | head -c 60000
             echo ""
             echo '```'
