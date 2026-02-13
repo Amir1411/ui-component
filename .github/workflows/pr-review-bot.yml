@@ -52,7 +52,7 @@ jobs:
           echo "Reviewing: $PR_URL"
 
           # IMPORTANT: call ADK explicitly to avoid "could not determine executable"
-          OUT="$(printf "%s\n" "$PR_URL" | npx -y @google/adk run src/agent.ts)"
+          OUT="$(printf "%s\n" "$PR_URL" | ./node_modules/.bin/adk run src/agent.ts)"
 
           echo "---- BOT OUTPUT START ----"
           echo "$OUT"
