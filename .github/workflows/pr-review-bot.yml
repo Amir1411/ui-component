@@ -1,0 +1,138 @@
+name: PR Review Bot (ADK API Server)
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: pr-review-bot-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout target repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Checkout pr-review-bot
+        uses: actions/checkout@v4
+        with:
+          repository: Amir1411/pr-review-bot
+          ref: main
+          path: pr-review-bot
+          fetch-depth: 1
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: pr-review-bot/package-lock.json
+
+      - name: Install bot dependencies
+        working-directory: pr-review-bot
+        run: |
+          # If you don't have package-lock.json yet, switch to: npm install --legacy-peer-deps
+          npm install --legacy-peer-deps
+
+      - name: Start ADK API server
+        working-directory: pr-review-bot
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
+          GEMINI_MODEL: gemini-2.5-flash
+        run: |
+          set -euo pipefail
+
+          # Start server in background
+          npx -y @google/adk api_server src/agent.ts > adk-server.log 2>&1 &
+          echo $! > adk-server.pid
+          echo "Started ADK server with PID $(cat adk-server.pid)"
+
+          # Wait until server is reachable (max ~30s)
+          for i in {1..30}; do
+            if curl -sS http://127.0.0.1:8000/ >/dev/null 2>&1; then
+              echo "ADK server is up"
+              exit 0
+            fi
+            sleep 1
+          done
+
+          echo "ADK server did not start in time"
+          echo "---- adk-server.log (tail) ----"
+          tail -n 200 adk-server.log || true
+          exit 1
+
+      - name: Call agent (PR URL)
+        working-directory: pr-review-bot
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          set -euo pipefail
+          echo "Reviewing: $PR_URL"
+
+          # NOTE: Endpoint paths can differ by version.
+          # If /run fails, check adk-server.log and adjust to the correct endpoint.
+          RESP="$(curl -sS -X POST http://127.0.0.1:8000/run \
+            -H "Content-Type: application/json" \
+            -d "$(jq -nc --arg input "$PR_URL" '{input:$input}')")"
+
+          echo "---- BOT OUTPUT START ----"
+          echo "$RESP"
+          echo "---- BOT OUTPUT END ----"
+
+          {
+            echo "## 🤖 PR Review Bot Report"
+            echo ""
+            echo "**PR:** $PR_URL"
+            echo ""
+            echo "### Response"
+            echo ""
+            echo '```json'
+            echo "$RESP" | head -c 60000
+            echo ""
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ALWAYS stop the server (even if previous steps fail)
+      - name: Stop ADK API server
+        if: always()
+        working-directory: pr-review-bot
+        run: |
+          set -euo pipefail
+
+          if [ -f adk-server.pid ]; then
+            PID="$(cat adk-server.pid)"
+            echo "Stopping ADK server PID=$PID"
+
+            # Try graceful stop
+            kill "$PID" 2>/dev/null || true
+
+            # Wait up to 10s, then force kill
+            for i in {1..10}; do
+              if ps -p "$PID" >/dev/null 2>&1; then
+                sleep 1
+              else
+                echo "ADK server stopped"
+                exit 0
+              fi
+            done
+
+            echo "Force killing ADK server PID=$PID"
+            kill -9 "$PID" 2>/dev/null || true
+          fi
+
+          # Extra safety: kill anything still bound to port 8000
+          if command -v lsof >/dev/null 2>&1; then
+            lsof -ti :8000 | xargs -r kill -9 || true
+          fi
+
+          echo "Cleanup complete"

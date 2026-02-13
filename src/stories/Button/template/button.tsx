@@ -1,10 +1,12 @@
-import { Button } from "@/components/Button";
+import { Button, ButtonProps } from "@/components/Button";
 import { StoryFn } from "@storybook/react";
+import { RefAttributes } from "react";
+import { JSX } from "react/jsx-runtime";
 
-const ButtonComponent: StoryFn<typeof Button> = (args) => {
+const ButtonComponent: StoryFn<typeof Button> = (args: JSX.IntrinsicAttributes & ButtonProps & RefAttributes<HTMLButtonElement>) => {
   return (
     <div>
-      <Button {...args} />
+      <Button {...args} size="lg" />
     </div>
   );
 };
