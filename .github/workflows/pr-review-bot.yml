@@ -1,0 +1,62 @@
+name: PR Review Bot (ADK)
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: pr-review-bot-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Run PR review bot
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # Use GitHub's built-in token for reading PR data in this repo
+          GITHUB_TOKEN: ${{ github.token }}
+          # optional if you use this env in your code
+          GEMINI_MODEL: gemini-2.5-flash
+        run: |
+          PR_URL="${{ github.event.pull_request.html_url }}"
+          echo "Reviewing: $PR_URL"
+
+          # Pipe PR URL into ADK runner (no web UI, no manual steps)
+          OUT="$(printf "%s\n" "$PR_URL" | npx adk run src/agent.ts)"
+
+          echo "---- BOT OUTPUT START ----"
+          echo "$OUT"
+          echo "---- BOT OUTPUT END ----"
+
+          # Write to GitHub Job Summary (nice for non-technical users)
+          {
+            echo "## PR Review Bot Report"
+            echo ""
+            echo "**PR:** $PR_URL"
+            echo ""
+            echo "### Output"
+            echo ""
+            echo '```markdown'
+            # prevent summary from becoming huge
+            echo "$OUT" | head -c 60000
+            echo ""
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
