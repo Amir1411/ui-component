@@ -1,4 +1,4 @@
-name: PR Review Bot (ADK)
+name: PR Review Bot (ADK API Server)
 
 on:
   pull_request:
@@ -15,14 +15,13 @@ concurrency:
 jobs:
   review:
     runs-on: ubuntu-latest
+
     steps:
-      # Checkout the repo where the PR is happening
       - name: Checkout target repo
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      # Checkout your bot repo into a subfolder
       - name: Checkout pr-review-bot
         uses: actions/checkout@v4
         with:
@@ -35,39 +34,105 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: npm
+          cache-dependency-path: pr-review-bot/package-lock.json
 
-      # Install dependencies INSIDE pr-review-bot
       - name: Install bot dependencies
         working-directory: pr-review-bot
-        run: npm install --legacy-peer-deps
+        run: |
+          # If you don't have package-lock.json yet, switch to: npm install --legacy-peer-deps
+          npm install --legacy-peer-deps
 
-      - name: Run PR review bot
+      - name: Start ADK API server
         working-directory: pr-review-bot
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GITHUB_TOKEN: ${{ github.token }}
           GEMINI_MODEL: gemini-2.5-flash
         run: |
-          PR_URL="${{ github.event.pull_request.html_url }}"
+          set -euo pipefail
+
+          # Start server in background
+          npx -y @google/adk api_server src/agent.ts > adk-server.log 2>&1 &
+          echo $! > adk-server.pid
+          echo "Started ADK server with PID $(cat adk-server.pid)"
+
+          # Wait until server is reachable (max ~30s)
+          for i in {1..30}; do
+            if curl -sS http://127.0.0.1:8000/ >/dev/null 2>&1; then
+              echo "ADK server is up"
+              exit 0
+            fi
+            sleep 1
+          done
+
+          echo "ADK server did not start in time"
+          echo "---- adk-server.log (tail) ----"
+          tail -n 200 adk-server.log || true
+          exit 1
+
+      - name: Call agent (PR URL)
+        working-directory: pr-review-bot
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          set -euo pipefail
           echo "Reviewing: $PR_URL"
 
-          # IMPORTANT: call ADK explicitly to avoid "could not determine executable"
-          OUT="$(printf "%s\n" "$PR_URL" | ./node_modules/.bin/adk run src/agent.ts)"
+          # NOTE: Endpoint paths can differ by version.
+          # If /run fails, check adk-server.log and adjust to the correct endpoint.
+          RESP="$(curl -sS -X POST http://127.0.0.1:8000/run \
+            -H "Content-Type: application/json" \
+            -d "$(jq -nc --arg input "$PR_URL" '{input:$input}')")"
 
           echo "---- BOT OUTPUT START ----"
-          echo "$OUT"
+          echo "$RESP"
           echo "---- BOT OUTPUT END ----"
 
-          # Job summary
           {
-            echo "## PR Review Bot Report"
+            echo "## 🤖 PR Review Bot Report"
             echo ""
             echo "**PR:** $PR_URL"
             echo ""
-            echo "### Output"
+            echo "### Response"
             echo ""
-            echo '```markdown'
-            echo "$OUT" | head -c 60000
+            echo '```json'
+            echo "$RESP" | head -c 60000
             echo ""
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # ALWAYS stop the server (even if previous steps fail)
+      - name: Stop ADK API server
+        if: always()
+        working-directory: pr-review-bot
+        run: |
+          set -euo pipefail
+
+          if [ -f adk-server.pid ]; then
+            PID="$(cat adk-server.pid)"
+            echo "Stopping ADK server PID=$PID"
+
+            # Try graceful stop
+            kill "$PID" 2>/dev/null || true
+
+            # Wait up to 10s, then force kill
+            for i in {1..10}; do
+              if ps -p "$PID" >/dev/null 2>&1; then
+                sleep 1
+              else
+                echo "ADK server stopped"
+                exit 0
+              fi
+            done
+
+            echo "Force killing ADK server PID=$PID"
+            kill -9 "$PID" 2>/dev/null || true
+          fi
+
+          # Extra safety: kill anything still bound to port 8000
+          if command -v lsof >/dev/null 2>&1; then
+            lsof -ti :8000 | xargs -r kill -9 || true
+          fi
+
+          echo "Cleanup complete"
